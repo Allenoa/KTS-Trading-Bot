@@ -1,20 +1,26 @@
 # config.py
+import os
+from dotenv import load_dotenv
 import torch
 
 # 1. 한국투자증권 API 설정 (본인 정보 입력 필수)
 # 모의 투자 계좌
-APP_KEY = "PSelPj8EY6BEzVJTMVHKCnALFECnYkxNpDdv"
-APP_SECRET = "0wTdQPux2UU5gNnIRHImdm+0xar6IJ++bfvesPX9Lvv2uhY88XYIhHsExTo4eoY77YcwkNiCoz7wZrP1Jk7Kmf1RasEGAzDWDIG0jK/xuyJWCE5LVmh1AGutubP53OVs6P/4yCR3SWXgFoKafm3M9j53noRTg249gXFWCvEDVKSJVUl9vYU="
-ACC_NO = "50159792" # 예: "12345678"
+APP_KEY = os.getenv("KIS_DEV_APP_KEY")
+APP_SECRET = os.getenv("KIS_DEV_APP_SECRET")
+ACC_NO = os.getenv("KIS_DEV_ACC_NO")
 
 # # 실전 투자 계좌
-# APP_KEY = "PSbl4nQdC5x4eu3qMZdyxfPiVvJElnCkb14s"
-# APP_SECRET = "D9LYAbl+Htv78tGwHgaNAUt9sjP4Q7WhdLyz82hUVzTYQ90guwjVZTCUy6VV+sWNjrasAHMW7LkQrIVPtuf4pxJAL6xq8eM3H3NvOraXe5eKzHEJQqLcL+YjUmkEzDQ+HTm6FQvlRSbPCUF+Wp5LqJ2ea49MgS6FMJhNO+q9LeHT7YA1FBc="
-# ACC_NO = "43783489" # 예: "12345678"
+# APP_KEY = os.getenv("KIS_LIVE_APP_KEY")
+# APP_SECRET = os.getenv("KIS_LIVE_APP_SECRET")
+# ACC_NO = os.getenv("KIS_LIVE_ACC_NO")
 
 # 실전투자 URL (모의투자는 'https://openapivts.koreainvestment.com:29443')
 # URL_BASE = "https://openapi.koreainvestment.com:9443"
 URL_BASE = "https://openapivts.koreainvestment.com:29443"
+
+if not APP_KEY or not APP_SECRET:
+    print("❌ [오류] .env 파일에서 APP_KEY 또는 APP_SECRET을 찾을 수 없습니다.")
+    print("   -> .env 파일이 있는지, 변수명이 정확한지 확인해주세요.")
 
 # 2. 하드웨어 설정 (RTX 4060 활용)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -26,4 +32,4 @@ DYNAMIC_RATIO = 0.5          # 공격/방어 모드 전환 기준 (잔고의 50%
 STOP_LOSS_RATE = -0.02       # 손절 라인 (-2%)
 TAKE_PROFIT_RATE = 0.04      # 익절 라인 (+4%)
 
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1460053535864393769/ym6mTR6yATneG_NLEmgli0zKhXnzdV7CZ9G5gs_SUF5Ds9XCFy80OTr8_Qj39dFagWbM"
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")

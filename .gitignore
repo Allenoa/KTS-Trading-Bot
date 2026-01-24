@@ -1,11 +1,11 @@
 # --- [보안 필수] 절대 올리면 안 되는 파일들 ---
 .env
 service_account.json
-config.py  # (만약 .env 안 쓰고 config.py에 키를 직접 적었다면 이것도 추가해야 함!)
 
 # --- 시스템/파이썬 관련 잡동사니 ---
 __pycache__/
 *.pyc
+*.pem
 .DS_Store
 .vscode/
 .idea/
