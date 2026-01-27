@@ -1,7 +1,66 @@
 import requests
+import time
+from datetime import datetime
+import pandas as pd
 import json
 from config import APP_KEY, APP_SECRET, ACC_NO, URL_BASE
 
+def debug_data():
+
+    # 1. 토큰 발급
+    try:
+        headers = {"content-type": "application/json"}
+        body = {"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET}
+        res = requests.post(f"{URL_BASE}/oauth2/tokenP", headers=headers, data=json.dumps(body))
+        token = res.json()['access_token']
+    except Exception as e:
+        print(f"❌ 토큰 발급부터 실패함: {e}")
+        return
+    
+    now = datetime.now()
+
+    currentTime = now.strftime("%H%M%S")
+    symbol = "005930"
+    
+    if "vts" in URL_BASE:
+        print("👉 모의투자(VTS) 환경 감지됨")
+        tr_id = "FHKST03010200"
+        url = f"{URL_BASE}/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
+        
+        # [테스트 1] 가장 유력한 파라미터 조합
+        params = {
+        "fid_cond_mrkt_div_code": "J",  
+        "fid_input_iscd": symbol,       
+        "fid_input_hour_1": currentTime,
+        "fid_etc_cls_code": "",
+        "fid_pw_data_incu_yn": "Y"
+        }
+    
+    headers = {
+        "Content-Type": "application/json", 
+        "authorization": f"Bearer {token}",
+        "appkey": APP_KEY, 
+        "appsecret": APP_SECRET, 
+        "tr_id": tr_id
+    }
+
+    try:
+        url = f"{URL_BASE}/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
+        response = requests.get(url, headers=headers, params=params)
+        data = response.json()
+        print(data)
+        
+        rawData = data.get("output2",[])
+        df = pd.DataFrame(rawData)
+        df = df.sort_values(by='stck_cntg_hour').reset_index(drop=True)
+
+        print(df)
+
+        return data.get('output', {})
+
+    except Exception as e:
+        print(f"   ❌ KIS 에러: {e}. 야후 파이낸스 연결 시도...")
+        
 def debug_cash():
     print("🕵️‍♂️ [자산 조회 디버깅] 서버 응답을 낱낱이 파헤칩니다...\n")
     
@@ -77,4 +136,4 @@ def debug_cash():
         print(f"❌ 요청 중 파이썬 에러 발생: {e}")
 
 if __name__ == "__main__":
-    debug_cash()
+    debug_data()

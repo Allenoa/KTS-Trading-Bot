@@ -129,6 +129,9 @@ def main():
     while True:
         now = datetime.now()
 
+        ksp, ksd = api.get_market_index()
+        current_market_rates = (ksp, ksd)
+
         # ======================================================
         # [0] 장 시작 전 대기 (09:00 이전)
         # ======================================================
@@ -212,7 +215,7 @@ def main():
             for symbol, info in my_stocks.items():
                 # [수정] info에 있는 'name'을 꺼내서 전달합니다. (없으면 symbol 사용)
                 stock_name = info.get('name', symbol)
-                manage_risk(api, symbol, info['qty'], info['buy_price'], model, predict, stock_name)
+                manage_risk(api, symbol, info['qty'], info['buy_price'], model, predict, stock_name, current_market_rates)
                 time.sleep(0.3)
 
         # ==========================================

@@ -41,79 +41,122 @@ def check_mode(api):
         return "ATTACK", 0.005   
 
 # [수정] stock_name 인자 추가
-def manage_risk(api, symbol, qty, buy_price, model, predict_func, stock_name):
+def manage_risk(api, symbol, qty, buy_price, model, predict_func, stock_name, market_rates):
     """
-    손절/익절 수행
+    [리스크 관리 v4] AI 중심 + 시장 상황 반영
+    1. 시장 상황에 따라 '기본 베이스(익절/손절 폭)'를 살짝 조정
+    2. 그 위에 AI 점수를 곱해서 최종 목표 확정
     """
     current_price = api.get_current_price(symbol)
-    if current_price == 0:
-        return False
+    if current_price == 0: return False
 
+    # 현재 종목 수익률
     raw_rate = (current_price - buy_price) / buy_price
     profit_rate = raw_rate * 100
     profit_amount = (current_price - buy_price) * qty
-    
-    # 이름이 없으면 코드로 대체
     display_name = stock_name if stock_name else symbol
 
-    # ----------------------------------------------------
-    # [AI 판단] 현재 이 종목, 더 들고 갈까?
-    # ----------------------------------------------------
+    # 1. AI 예측 점수 확인
     df = api.fetch_ohlcv(symbol, timeframe='3m', count=40)
-    
     ai_score = 0.0
     if df is not None and len(df) >= 20:
         ai_score = predict_func(model, df)
     
-    target_profit_pct = TAKE_PROFIT_RATE * 100
-    stop_loss_pct = STOP_LOSS_RATE * 100
+    # ---------------------------------------------------------
+    # [1단계] 시장 지수(Environment) 반영 -> '기본 베이스'만 조정
+    # ---------------------------------------------------------
+    kospi, kosdaq = market_rates
+    avg_market = (kospi + kosdaq) / 2
+    
+    # 설정값 가져오기 (예: 익절 4.0%, 손절 -2.0%)
+    base_target = TAKE_PROFIT_RATE * 100 
+    base_stop = STOP_LOSS_RATE * 100
+    
+    market_msg = ""
 
-    if ai_score > 0.01:
-        target_profit_pct = TAKE_PROFIT_RATE * 150 
-        stop_loss_pct = STOP_LOSS_RATE * 100   
-        status_msg = "🔥 AI: 강력 홀딩 (목표가 상향)"
-    elif ai_score > 0.005:
-        target_profit_pct = TAKE_PROFIT_RATE * 100
-        status_msg = "📈 AI: 상승세 (기본 홀딩)"
+    # 시장이 좋을 때: 손절 라인을 조금 여유롭게 줌 (흔들려도 버티게)
+    if avg_market >= 0.3:
+        # 익절폭은 그대로(AI가 정함), 손절폭만 10% 늘림 (예: -2.0% -> -2.2%)
+        base_stop *= 1.1 
+        market_msg = "📈 시장 상승세"
+
+    # 시장이 나쁠 때: 목표를 조금 낮추고, 손절을 타이트하게 잡음
+    elif avg_market <= 0:
+        base_target *= 0.9 # 목표 10% 하향 (예: 4.0% -> 3.6%)
+        base_stop *= 0.8   # 손절 20% 축소 (예: -2.0% -> -1.6% 칼손절)
+        market_msg = "📉 시장 하락세"
+    
+    # ---------------------------------------------------------
+    # [2단계] AI 점수(Actor) 반영 -> 최종 매도 결정 (여기가 메인)
+    # ---------------------------------------------------------
+    
+    final_target = base_target
+    final_stop = base_stop
+    status_msg = "😐 AI: 중립"
+
+    # AI가 강력 추천하면 시장이 안 좋아도 목표가 대폭 상향
+    if ai_score >= 0.01:
+        final_target = base_target * 1.5  # (예: 3.6% -> 5.4%)
+        # AI 믿고 손절폭도 넓혀줌 (버티기)
+        if final_stop > -3.0: 
+            final_stop = -3.0 
+        status_msg = "🔥 AI: 강력 상승"
+
+    elif ai_score >= 0.005:
+        final_target = base_target * 1.2
+        status_msg = "📈 AI: 상승세"
+
     elif ai_score < 0:
-        target_profit_pct = TAKE_PROFIT_RATE * 25  
-        stop_loss_pct = STOP_LOSS_RATE * 60     
-        status_msg = "📉 AI: 하락 반전 (보수적 대응)"
-    else:
-        status_msg = "😐 AI: 중립"
+        # AI도 안 좋게 보면 목표/손절 모두 줄임
+        final_target = base_target * 0.8
+        final_stop = base_stop * 0.9
+        status_msg = "📉 AI: 하락세"
 
-    # 1. 익절
-    if profit_rate >= target_profit_pct:
+    # ---------------------------------------------------------
+    # [3단계] 트레일링 스탑 (수익 보존)
+    # ---------------------------------------------------------
+    # 이미 2% 이상 수익 중이라면, 절대 손해 보고 팔지 않게 세팅
+    if profit_rate >= 2.0:
+        if final_stop < 0.5: 
+            final_stop = 0.5 
+            status_msg += " (🔒 수익보존)"
+
+    # 이미 5% 이상 수익 중이라면 익절 라인 대폭 상향
+    if profit_rate >= 5.0:
+        final_stop = 3.0
+
+    # ---------------------------------------------------------
+    # [4단계] 매매 실행
+    # ---------------------------------------------------------
+    
+    # 1. 익절 달성
+    if profit_rate >= final_target:
         api.sell_market_order(symbol, qty) 
-
         msg = (
-            f"**📈 종목:** {display_name} ({symbol})\n"  # [수정] 이름 표시
-            f"**💰 수익률:** +{profit_rate:.2f}%\n"
-            f"**💵 실현손익:** {profit_amount:+,}원\n"
-            f"**📦 매도수량:** {qty}주\n"
-            f"**🤖 AI 판단:** {status_msg}\n"
-            f"**🤖 AI 점수:** {ai_score:.4f}"
+            f"**🎉 익절 성공!** {market_msg}\n"
+            f"종목: {display_name}\n"
+            f"수익: +{profit_rate:.2f}% ({profit_amount:+,}원)\n"
+            f"AI: {status_msg} ({ai_score:.4f})\n"
+            f"(목표: {final_target:.2f}%)"
         )
-        print(f"🎉 [익절] {display_name} (+{profit_rate:.2f}%) -> {qty}주 전량 매도")
-        send_message("🎉 익절 성공! (수익 실현)", msg, color=0x00ff00)
-        
+        send_message("💰 익절 알림", msg, color=0x00ff00)
         return True
 
-    # 2. 손절
-    elif profit_rate <= stop_loss_pct:
+    # 2. 손절 달성
+    elif profit_rate <= final_stop:
         api.sell_market_order(symbol, qty)
-
-        msg = (
-            f"**📉 종목:** {display_name} ({symbol})\n" # [수정] 이름 표시
-            f"**💧 수익률:** {profit_rate:.2f}%\n"
-            f"**💸 손실금액:** {profit_amount:+,}원\n"
-            f"**📦 매도수량:** {qty}주\n"
-            f"**🤖 AI 판단:** {status_msg}\n"
-            f"**🤖 AI 점수:** {ai_score:.4f}"
-        )
-        print(f"💧 [손절] {display_name} ({profit_rate:.2f}%) -> {qty}주 전량 매도")
-        send_message("💧 손절 매도 (리스크 관리)", msg, color=0xff0000)
         
+        title = "🛡️ 수익 보존 매도" if profit_rate > 0 else "💧 손절 매도 "
+        color = 0x00ff00 if profit_rate > 0 else 0xff0000
+        
+        msg = (
+            f"**{title}** ({market_msg})\n"
+            f"종목: {display_name}\n"
+            f"수익: {profit_rate:.2f}% ({profit_amount:+,}원)\n"
+            f"AI: {status_msg}\n"
+            f"(기준: {final_stop:.2f}%)"
+        )
+        send_message(title, msg, color=color)
         return True
 
     return False

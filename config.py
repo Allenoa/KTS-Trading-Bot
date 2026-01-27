@@ -3,6 +3,8 @@ import os
 from dotenv import load_dotenv
 import torch
 
+load_dotenv()
+
 # 1. 한국투자증권 API 설정 (본인 정보 입력 필수)
 # 모의 투자 계좌
 APP_KEY = os.getenv("KIS_DEV_APP_KEY")

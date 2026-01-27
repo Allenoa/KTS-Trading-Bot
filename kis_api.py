@@ -2,6 +2,7 @@
 import requests
 import json
 import time
+from datetime import datetime
 import pandas as pd
 import numpy as np
 import yfinance as yf # 야후 파이낸스 추가
@@ -78,100 +79,149 @@ class KISApi:
 
     def get_top_100(self):
         """
-        [종목 발굴 엔진 업그레이드] 
-        유명 우량주 + 거래량 급증주 + 가격 급등주를 혼합하여 추출
+        [종목 발굴 엔진 v2] 
+        단순 거래량이 아닌 '거래대금(돈)'이 몰리는 종목을 우선 수집합니다.
+        잡주를 거르고 시장의 주도주를 찾습니다.
         """
-        all_symbols = set() # 중복 제거를 위해 set 사용
+        all_symbols = set() 
         
-        # 1. 고정 우량주 (삼성전자, 하이닉스 등 필수 종목)
+        # 1. 안전한 우량주 (기존 유지)
         blue_chips = [
             "005930", # 삼성전자
             "000660", # SK하이닉스
-            "373220", # LG에너지솔루션 (배터리 대장)
-            "207940", # 삼성바이오로직스 (바이오 대장)
+            "373220", # LG에너지솔루션
+            "207940", # 삼성바이오로직스
             "005380", # 현대차
             "000270", # 기아
             "068270", # 셀트리온
-            "005490", # POSCO홀딩스 (철강/리튬)
+            "005490", # POSCO홀딩스
             "035420", # NAVER
             "035720", # 카카오
             "006400", # 삼성SDI
             "051910", # LG화학
-            "105560", # KB금융 (금융 대장)
+            "105560", # KB금융
             "055550", # 신한지주
             "003550", # LG
             "032830", # 삼성생명
             "015760", # 한국전력
-            "034020", # 두산에너빌리티 (원전)
+            "034020", # 두산에너빌리티
             "017670", # SK텔레콤
-            "010140", # 삼성중공업 (조선)
+            "010140", # 삼성중공업
+            "086520", # 에코프로 (코스닥 대장)
+            "247540", # 에코프로비엠
+            "028300", # HLB
+            "403870", # HPSP
+            "000100", # 유한양행
+            "042700", # 한미반도체 (AI 반도체)
+            "011200", # HMM
+            "010130", # 고려아연
+            "009540", # HD한국조선해양
+            "012330"  # 현대모비스
         ]
         all_symbols.update(blue_chips)
 
-        # 2. 거래량 상위 종목 (시장의 주도주)
+        # ---------------------------------------------------------
+        # [시도 1] 체결강도 상위 종목 (주도주)
+        # ---------------------------------------------------------
+        print("\n📡 시장의 주도주(체결강도 상위) 스캔 시도...")
+        
+        # 체결강도 TR ID
+        headers_amt = self.get_headers("FHPST01680000")
+        params_amt = {
+            "fid_trgt_exls_cls_code": "0", "fid_cond_mrkt_div_code": "J", "fid_cond_scr_div_code": "20168", "fid_input_iscd": "0000", 
+            "fid_div_cls_code": "0", "fid_input_price_1": "", "fid_input_price_2": "", 
+            "fid_vol_cnt": "", "fid_trgt_cls_code": "0"
+        }
+        
+        success_amt = False
+        try:
+            res = requests.get(f"{URL_BASE}/uapi/domestic-stock/v1/ranking/volume-power", headers=headers_amt, params=params_amt)
+            # [핵심 수정] 응답 내용이 비어있는지 먼저 확인
+            if not res.text:
+                raise Exception("서버 응답이 비어있습니다 (Blank Response)")
+            data = res.json()
+            
+            if data['rt_cd'] == '0':
+                count = 0
+                for item in data['output'][:40]: 
+                    sym = item['stck_shrn_iscd']
+                    name = item.get('hts_kor_isnm') or item.get('stck_shrn_isnm') or ""
+                    
+                    if sym[0].isdigit() and not self.is_dirty_stock(name):
+                        all_symbols.add(sym)
+                        count += 1
+                print(f"   👉 체결강도 폭발 종목 {count}개 선정 완료")
+                success_amt = True
+            else:
+                print(f"   ⚠️ API 조회 실패 (Code: {data.get('msg_cd')}, Msg: {data.get('msg1')})")
+                
+        except Exception as e:
+            print(f"   ⚠️ 체결강도 스캔 타임아웃/에러: {e}")
+            print("   👉 모의투자 서버 문제로 추정됩니다. '급등주' 조회로 전환합니다.")
+
+        # ---------------------------------------------------------
+        # [시도 2] 급등주 상위 (대안 - 체결강도 실패 시 실행)
+        # ---------------------------------------------------------
+        if not success_amt:
+            print("📡 [대안] 급등주 상위 종목으로 재시도 중...")
+            try:
+                headers_up = self.get_headers("FHPST01700000")
+                params_up = {
+                    "fid_rsfl_rate2": "", 
+                    "fid_cond_mrkt_div_code": "J", "fid_cond_scr_div_code": "20170", "fid_input_iscd": "0000",
+                    "fid_rank_sort_cls_code": "0", "fid_input_cnt_1": "0", "fid_prc_cls_code": "1", 
+                    "fid_input_price_1": "", "fid_input_price_2": "", "fid_vol_cnt": "", 
+                    "fid_trgt_cls_code": "0", "fid_trgt_exls_cls_code": "0", "fid_div_cls_code": "0", "fid_rsfl_rate1": ""
+                }
+                res = requests.get(f"{URL_BASE}/uapi/domestic-stock/v1/ranking/fluctuation", headers=headers_up, params=params_up)
+                data = res.json()
+                if data['rt_cd'] == '0':
+                    count = 0
+                    for item in data['output'][:30]:
+                        sym = item['mksc_shrn_iscd']
+                        name = item.get('hts_kor_isnm') or item.get('stck_shrn_isnm') or ""
+                        
+                        if sym[0].isdigit() and not self.is_dirty_stock(name):
+                            all_symbols.add(sym)
+                            count += 1
+                    print(f"   👉 급등주 {count}개 추가 선정")
+                else:
+                    print(f"   ⚠️ 급등주 조회 실패 (서버 응답): {data.get('msg1')}")
+            except Exception as e:
+                pass
+            
+        
+        # 3. 거래량 (기존 유지 - 변동성 확보용)
         headers_vol = self.get_headers("FHPST01710000")
         params_vol = {
             "fid_cond_mrkt_div_code": "J", "fid_cond_scr_div_code": "20171", "fid_input_iscd": "0000",
             "fid_div_cls_code": "0", "fid_blng_cls_code": "0", "fid_trgt_cls_code": "11111111", 
             "fid_trgt_exls_cls_code": "000000", "fid_input_price_1": "", "fid_input_price_2": "", "fid_vol_cnt": "", "fid_input_date_1": ""
         }
-        
         try:
-            print("\n📡 거래량 상위 종목 필터링 중...")
+            # 여기도 timeout 추가
             res = requests.get(f"{URL_BASE}/uapi/domestic-stock/v1/quotations/volume-rank", headers=headers_vol, params=params_vol)
             data = res.json()
             if data['rt_cd'] == '0':
                 count = 0
-                for item in data['output'][:60]: # 60개 가져와서 거름
-                    sym = item['mksc_shrn_iscd']
-                    # API마다 이름 키값이 다를 수 있어 안전하게 가져오기
-                    name = item.get('hts_kor_isnm') or item.get('stck_shrn_isnm') or ""
-                    
-                    if sym[0].isdigit(): # 숫자 코드로 된 것만 (주식)
-                        # [수정] self.is_dirty_stock 호출
-                        if self.is_dirty_stock(name):
-                            pass
-                        else:
-                            all_symbols.add(sym)
-                            count += 1
-                print(f"   👉 거래량 상위에서 {count}개 종목 선정 완료")
-        except Exception as e:
-            print(f"   ⚠️ 거래량 순위 에러: {e}")
-
-        # 3. 급등주 스캔
-        headers_up = self.get_headers("FHPST01700000")
-        params_up = {
-            "fid_cond_mrkt_div_code": "J", "fid_cond_scr_div_code": "20170", "fid_input_iscd": "0000",
-            "fid_rank_sort_cls_code": "0", "fid_input_cnt_1": "0", "fid_prc_cls_code": "1", "fid_input_price_1": "", "fid_input_price_2": "",
-            "fid_vol_cnt": "", "fid_trgt_cls_code": "11111111", "fid_trgt_exls_cls_code": "000000"
-        }
-        
-        try:
-            print("📡 급등주 필터링 중...")
-            res = requests.get(f"{URL_BASE}/uapi/domestic-stock/v1/ranking/fluctuation", headers=headers_up, params=params_up)
-            data = res.json()
-            if data['rt_cd'] == '0':
-                count = 0
-                for item in data['output'][:60]:
+                for item in data['output'][:40]:
                     sym = item['mksc_shrn_iscd']
                     name = item.get('hts_kor_isnm') or item.get('stck_shrn_isnm') or ""
-                    
-                    if sym[0].isdigit():
-                        # [수정] self.is_dirty_stock 호출
-                        if self.is_dirty_stock(name):
-                            pass
-                        else:
-                            all_symbols.add(sym)
-                            count += 1
-                print(f"   👉 급등주에서 {count}개 종목 선정 완료")
+                    if sym[0].isdigit() and not self.is_dirty_stock(name):
+                        all_symbols.add(sym)
+                        count += 1
+                print(f"   👉 거래량 상위에서 {count}개 종목 선정 (대체 완료)")
+            else:
+                print(f"   ⚠️ API 조회 실패 (Code: {data.get('msg_cd')}, Msg: {data.get('msg1')})")
         except Exception as e:
-            print(f"   ⚠️ 급등주 에러: {e}")
+                print(f"   ⚠️ 거래량 조회도 실패: {e}")
 
         final_list = list(all_symbols)
         print(f"✅ 최종 감시 대상: 총 {len(final_list)}개 종목 확보!")
         return final_list
 
     def fetch_ohlcv(self, symbol, timeframe='3m', count=100):
+        time.sleep(0.5)
         """
         [핵심 수정] 분봉 데이터 조회 전략
         1순위: 한국투자증권(KIS) 3분봉
@@ -180,24 +230,27 @@ class KISApi:
         # 1. KIS API 시도
         headers = self.get_headers("FHKST03010200")
         headers["content-type"] = "application/json; charset=utf-8"
-        
+
+        now = datetime.now()
+        currentTime = now.strftime("%H%M%S")
+
         # [시간 파라미터] 공란으로 두면 '가장 최근' 데이터를 줍니다.
         # (이게 안 되면 장 운영 시간이 아니거나 권한 문제)
         params = {
-            "fid_cond_mrkt_div_code": "J",
-            "fid_input_iscd": symbol,
+            "fid_cond_mrkt_div_code": "J",  
+            "fid_input_iscd": symbol,       
+            "fid_input_hour_1": currentTime,
             "fid_etc_cls_code": "",
-            "fid_pw_data_inum_2": "1",
-            "fid_input_hour_1": "" 
+            "fid_pw_data_incu_yn": "Y"
         }
         
         try:
             url = f"{URL_BASE}/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
             res = requests.get(url, headers=headers, params=params)
             data = res.json()
-            
-            if data['rt_cd'] == '0' and data['output2']:
+            if data.get("output2"):
                 # KIS 성공
+                print(f"   ✅ KIS 분봉 성공({symbol}).")
                 return pd.DataFrame(data['output2'])
             else:
                 # KIS 실패 -> 바로 야후 파이낸스로 전환
@@ -281,7 +334,7 @@ class KISApi:
                 return data['output']['prdt_name']
             else:
                 # print(f"   ⚠️ 이름 조회 실패({symbol}): {data.get('msg1')}")
-                return data # 실패하면 코드 반환
+                return symbol # 실패하면 코드 반환
 
         except Exception as e:
             print(f"   ❌ 종목명 에러({symbol}): {e}")
@@ -652,3 +705,64 @@ class KISApi:
 
         except Exception as e:
             print(f"❌ 미체결 확보 중 오류: {e}")
+
+    def get_market_index(self):
+        """
+        [시장 지수 조회 - 하이브리드 방식]
+        1차 시도: KIS API (실전투자용, 가장 빠름)
+        2차 시도: 실패하거나 0.0이 나오면 야후 파이낸스 (모의투자용 비상 대책)
+        """
+        kospi_rate = 0.0
+        kosdaq_rate = 0.0
+        
+        # ---------------------------------------------------------
+        # [1차] KIS API 시도 (실전 서버에서는 이게 작동함)
+        # ---------------------------------------------------------
+        try:
+            # 업종/지수 전용 URL
+            headers = self.get_headers("FHKST01010100")
+            url = f"{URL_BASE}/uapi/domestic-stock/v1/quotations/inquire-price"
+            
+            # 코스피(0001)
+            params = {"fid_cond_mrkt_div_code": "U", "fid_input_iscd": "0001"}
+            res = requests.get(url, headers=headers, params=params, timeout=1)
+            if res.json()['rt_cd'] == '0':
+                kospi_rate = float(res.json()['output']['prdy_ctrt'])
+            
+            # 코스닥(1001)
+            params = {"fid_cond_mrkt_div_code": "U", "fid_input_iscd": "1001"}
+            res = requests.get(url, headers=headers, params=params, timeout=1)
+            if res.json()['rt_cd'] == '0':
+                kosdaq_rate = float(res.json()['output']['prdy_ctrt'])
+
+        except Exception as e:
+            pass # KIS 실패하면 조용히 넘어감
+
+        # ---------------------------------------------------------
+        # [2차] 야후 파이낸스 비상 대책 (모의투자라서 0.0 나오면 실행)
+        # ---------------------------------------------------------
+        # 둘 다 0.0이면 데이터가 안 온 것으로 간주
+        if kospi_rate == 0.0 and kosdaq_rate == 0.0:
+            # print("   ⚠️ [VTS] KIS 지수 조회 불가 -> 야후 파이낸스로 전환합니다.")
+            try:
+                # 야후 파이낸스 티커: ^KS11(코스피), ^KQ11(코스닥)
+                # history(period='2d')로 어제와 오늘 데이터를 가져옴
+                ks_df = yf.Ticker("^KS11").history(period="2d")
+                kq_df = yf.Ticker("^KQ11").history(period="2d")
+
+                if len(ks_df) >= 2:
+                    # (오늘종가 - 어제종가) / 어제종가 * 100
+                    kospi_rate = ((ks_df['Close'].iloc[-1] - ks_df['Close'].iloc[-2]) / ks_df['Close'].iloc[-2]) * 100
+                
+                if len(kq_df) >= 2:
+                    kosdaq_rate = ((kq_df['Close'].iloc[-1] - kq_df['Close'].iloc[-2]) / kq_df['Close'].iloc[-2]) * 100
+                    
+                # 소수점 둘째 자리까지만 (보기 좋게)
+                kospi_rate = round(kospi_rate, 2)
+                kosdaq_rate = round(kosdaq_rate, 2)
+                
+            except Exception as e:
+                # print(f"   ❌ 야후 지수 조회 실패: {e}")
+                pass
+        print(f"   [VTS] 코스피 지수: {kospi_rate:.2f}%, 코스닥 지수: {kosdaq_rate:.2f}%")
+        return kospi_rate, kosdaq_rate
