@@ -1,4 +1,4 @@
-# run_collection.py
+# run_collector.py
 import os
 import time
 import pandas as pd
@@ -12,27 +12,29 @@ def run():
     if not os.path.exists("data/raw"):
         os.makedirs("data/raw")
 
-    print("🚀 데이터 수집기 가동 (Top 100 모드)")
+    print("🚀 데이터 수집기 가동 (Top 100 + 수동 우량주)")
 
-    # 2. 시가총액 상위 100개 리스트 확보
-    top_100_symbols = api.get_top_100()
+    # 2. 종목 리스트 확보 (API 실패 시 수동 리스트 자동 사용됨)
+    # kis_api.py에서 이미 안전장치를 해뒀으므로 그냥 호출하면 됩니다.
+    target_symbols = api.get_top_100()
     
-    if not top_100_symbols:
+    if not target_symbols:
         print("❌ 종목 리스트를 가져오지 못했습니다. 프로그램을 종료합니다.")
         return
 
-    print(f"✅ 총 {len(top_100_symbols)}개 종목의 데이터를 수집합니다.")
+    print(f"✅ 총 {len(target_symbols)}개 종목의 데이터를 수집합니다.")
     
     # 3. 각 종목별 데이터 수집 (Loop)
-    for idx, symbol in enumerate(top_100_symbols):
-        print(f"[{idx+1}/{len(top_100_symbols)}] {symbol} 데이터 수집 중...", end=" ")
+    for idx, symbol in enumerate(target_symbols):
+        print(f"[{idx+1}/{len(target_symbols)}] {symbol} 데이터 수집 중...", end=" ")
         
-        # 과거 데이터 요청 (분봉)
-        df = api.fetch_ohlcv(symbol, timeframe='3m')
+        # [핵심 변경] count=500
+        # 보조지표 계산(RSI 14일, 이동평균 20일)을 위해 데이터가 넉넉해야 합니다.
+        # 너무 짧으면 train.py에서 전처리하다가 다 지워집니다.
+        df = api.fetch_ohlcv(symbol, timeframe='3m', count=500)
         
         if df is not None and not df.empty:
-            # 필요한 컬럼만 선택 (API 응답 키값 기준)
-            # stck_prpr:현재가, stck_oprc:시가, stck_hgpr:고가, stck_lwpr:저가, cntg_vol:체결량
+            # 필요한 기본 컬럼 선택 (API 응답 키값 기준)
             df_save = df[['stck_prpr', 'stck_oprc', 'stck_hgpr', 'stck_lwpr', 'cntg_vol']]
             
             # CSV 저장
@@ -41,11 +43,11 @@ def run():
         else:
             print("실패 (데이터 없음)")
         
-        # [중요] API 호출 제한 방지 (초당 2회 제한 준수)
-        time.sleep(0.5)
+        # API 호출 제한 방지
+        time.sleep(0.3)
 
     print("\n🎉 모든 데이터 수집이 완료되었습니다!")
-    print("이제 'train.py'를 실행하여 학습을 시작하세요.")
+    print("이제 'python train.py'를 실행하여 똑똑해진 AI를 학습시키세요.")
 
 if __name__ == "__main__":
     run()

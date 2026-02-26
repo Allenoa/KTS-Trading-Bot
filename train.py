@@ -9,59 +9,92 @@ import glob
 from model import ScalpingLSTM
 from config import DEVICE
 
-# [설정] 데이터가 적어도 학습되도록 설정값 조정
-SEQ_LEN = 10  # 과거 10개를 보고 다음을 예측
-BATCH_SIZE = 16
-EPOCHS = 50
+# [설정]
+SEQ_LEN = 10     # 10개를 보고
+PREDICT_LEN = 1  # 1개를 예측
+BATCH_SIZE = 32  # 배치 사이즈 살짝 증가
+EPOCHS = 100     # 학습 횟수 증가
+
+def add_advanced_features(df):
+    """
+    [Feature Engineering] 
+    AI가 시장을 더 잘 이해하도록 보조지표 5개를 추가합니다.
+    총 10개 피쳐: [종가, 시가, 고가, 저가, 거래량] + [이격도5, 이격도20, RSI, 변동성, 거래량변화]
+    """
+    df = df.copy()
+    
+    # 0. 기본 전처리 (숫자 변환)
+    cols = ['stck_prpr', 'stck_oprc', 'stck_hgpr', 'stck_lwpr', 'cntg_vol']
+    for col in cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # [중요] 시간 순서 정렬 (과거 -> 미래)
+    # API 데이터는 보통 역순(최신이 위)이므로 뒤집어줘야 함
+    df = df.iloc[::-1].reset_index(drop=True)
+
+    # 1. 이동평균 이격도 (Disparity)
+    # 가격이 평균보다 얼마나 높냐/낮냐 (1.05 = 5% 비쌈)
+    df['ma5'] = df['stck_prpr'].rolling(window=5).mean()
+    df['ma20'] = df['stck_prpr'].rolling(window=20).mean()
+    df['disp5'] = df['stck_prpr'] / (df['ma5'] + 1e-8)
+    df['disp20'] = df['stck_prpr'] / (df['ma20'] + 1e-8)
+
+    # 2. RSI (상대강도지수)
+    delta = df['stck_prpr'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / (loss + 1e-8)
+    df['rsi'] = 100 - (100 / (1 + rs))
+
+    # 3. 로그 수익률 (변동성)
+    df['log_ret'] = np.log(df['stck_prpr'] / df['stck_prpr'].shift(1))
+
+    # 4. 거래량 변화율
+    df['vol_chg'] = df['cntg_vol'] / (df['cntg_vol'].shift(1) + 1e-8)
+
+    # NaN 제거 (지표 계산하느라 앞부분 20개 정도 빔)
+    df = df.dropna().reset_index(drop=True)
+    
+    return df
 
 class StockDataset(Dataset):
     def __init__(self, file_paths, seq_len=SEQ_LEN):
         self.samples = []
-        self.seq_len = seq_len
         
-        print(f"📂 학습 데이터 로딩 중... (파일 {len(file_paths)}개 감지)")
+        print(f"📂 학습 데이터 로딩 및 피쳐 생성 중... (파일 {len(file_paths)}개)")
         
         for path in file_paths:
             try:
-                # 1. CSV 읽기
-                df = pd.read_csv(path)
-                
-                # 데이터가 텅 비었거나 너무 짧으면 패스
-                if len(df) < seq_len + 1:
-                    continue
+                raw_df = pd.read_csv(path)
+                if len(raw_df) < 30: continue # 데이터 너무 적으면 패스
 
-                # 문자열을 숫자로 강제 변환 (에러 방지)
-                cols = ['stck_prpr', 'stck_oprc', 'stck_hgpr', 'stck_lwpr', 'cntg_vol']
-                for col in cols:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                # ★ 보조지표 추가 (Feature Engineering)
+                df = add_advanced_features(raw_df)
                 
-                # NaN(빈값) 제거
-                df = df.dropna()
+                if len(df) < seq_len + 1: continue
 
-                # 시간 순서 정렬 (일봉은 역순으로 들어오므로 뒤집기)
-                df = df.iloc[::-1].reset_index(drop=True)
+                # 사용할 컬럼 10개 선정
+                features = ['stck_prpr', 'stck_oprc', 'stck_hgpr', 'stck_lwpr', 'cntg_vol', 
+                            'disp5', 'disp20', 'rsi', 'log_ret', 'vol_chg']
+                
+                data = df[features].values
+                
+                # 정규화 (MinMax Scaling 0~1)
+                # 각 컬럼별로 최대/최소 구해서 정규화
+                min_vals = data.min(axis=0)
+                max_vals = data.max(axis=0)
+                
+                # 분모 0 방지
+                ranges = max_vals - min_vals
+                ranges[ranges == 0] = 1e-8
+                
+                scaled_data = (data - min_vals) / ranges
 
-                # 4. 정규화 (Normalization)
-                price_data = df[['stck_prpr', 'stck_oprc', 'stck_hgpr', 'stck_lwpr']].values
-                volume_data = df[['cntg_vol']].values
-                
-                price_max = price_data.max()
-                price_min = price_data.min()
-                vol_max = volume_data.max()
-                
-                if price_max == price_min or vol_max == 0:
-                    continue
-
-                scaled_price = (price_data - price_min) / (price_max - price_min + 1e-8)
-                scaled_vol = volume_data / (vol_max + 1e-8)
-                
-                # 합치기 (5개 피쳐)
-                data = np.hstack([scaled_price, scaled_vol])
-                
-                # 5. 시퀀스 데이터 생성
-                for i in range(len(data) - seq_len):
-                    x = data[i : i+seq_len]      # 과거 10일치
-                    y = data[i+seq_len][0]       # 다음날 종가(현재가) 예측
+                # 시퀀스 데이터 생성
+                for i in range(len(scaled_data) - seq_len):
+                    x = scaled_data[i : i+seq_len]      # 10일치 데이터 (10개 컬럼)
+                    # 예측 목표: 다음날의 '종가(Close)' (0번째 컬럼)
+                    y = scaled_data[i+seq_len][0]       
                     
                     self.samples.append((
                         torch.FloatTensor(x), 
@@ -69,7 +102,7 @@ class StockDataset(Dataset):
                     ))
                     
             except Exception as e:
-                print(f"⚠️ 데이터 처리 중 에러 ({path}): {e}")
+                # print(f"⚠️ 에러({path}): {e}")
                 continue
 
     def __len__(self):
@@ -87,25 +120,16 @@ def train():
         return
 
     dataset = StockDataset(file_list)
-    
     if len(dataset) == 0:
-        print("⚠️ 유효한 학습 데이터가 없습니다. (데이터 부족 또는 형식 오류)")
+        print("⚠️ 학습 가능한 데이터가 없습니다.")
         return
 
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
-    print(f"✅ 데이터셋 준비 완료! (총 샘플 수: {len(dataset)}개)")
+    print(f"✅ 데이터셋 준비 완료! (총 샘플: {len(dataset)}개)")
 
-    # [핵심 수정] 변수명 지정 없이 순서대로 값만 전달 (위치 인자 사용)
-    # ScalpingLSTM(input_size, hidden_size, num_layers, output_size) 순서라고 가정
-    # 에러가 나지 않게 가장 일반적인 순서로 값을 넣습니다.
-    # (입력차원: 5, 은닉층: 32, 레이어수: 2, 출력차원: 1)
-    try:
-        model = ScalpingLSTM(5, 32, 2, 1).to(DEVICE)
-    except Exception as e:
-        print(f"❌ 모델 초기화 에러: {e}")
-        print("💡 model.py의 __init__ 함수 인자 순서를 확인해주세요.")
-        return
-
+    # [모델 생성] input_size=10 (피쳐 개수)
+    model = ScalpingLSTM(input_size=10, hidden_size=64, num_layers=2, output_size=1, dropout=0.2).to(DEVICE)
+    
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     criterion = nn.MSELoss()
 
@@ -130,7 +154,7 @@ def train():
             print(f"Epoch [{epoch+1}/{EPOCHS}] Loss: {avg_loss:.6f}")
 
     torch.save(model.state_dict(), "scalping_model.pth")
-    print("🎉 학습 완료! 'scalping_model.pth' 저장됨.")
+    print("🎉 학습 완료! 모델 저장됨: scalping_model.pth")
 
 if __name__ == "__main__":
     train()

@@ -33,5 +33,7 @@ WINDOW_SIZE = 30             # AI가 학습할 과거 데이터 길이 (3분봉 
 DYNAMIC_RATIO = 0.5          # 공격/방어 모드 전환 기준 (잔고의 50%)
 STOP_LOSS_RATE = -0.02       # 손절 라인 (-2%)
 TAKE_PROFIT_RATE = 0.04      # 익절 라인 (+4%)
+SEQ_LEN = 10 
+TOP_N = 50                # AI가 학습할 과거 데이터 길이
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")

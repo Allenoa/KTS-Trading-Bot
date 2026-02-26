@@ -132,7 +132,7 @@ class KISApi:
             "fid_div_cls_code": "0", "fid_input_price_1": "", "fid_input_price_2": "", 
             "fid_vol_cnt": "", "fid_trgt_cls_code": "0"
         }
-        
+        time.sleep(1)
         success_amt = False
         try:
             res = requests.get(f"{URL_BASE}/uapi/domestic-stock/v1/ranking/volume-power", headers=headers_amt, params=params_amt)
@@ -164,6 +164,7 @@ class KISApi:
         # ---------------------------------------------------------
         if not success_amt:
             print("📡 [대안] 급등주 상위 종목으로 재시도 중...")
+            time.sleep(1)
             try:
                 headers_up = self.get_headers("FHPST01700000")
                 params_up = {
@@ -199,6 +200,7 @@ class KISApi:
             "fid_trgt_exls_cls_code": "000000", "fid_input_price_1": "", "fid_input_price_2": "", "fid_vol_cnt": "", "fid_input_date_1": ""
         }
         try:
+            time.sleep(1)
             # 여기도 timeout 추가
             res = requests.get(f"{URL_BASE}/uapi/domestic-stock/v1/quotations/volume-rank", headers=headers_vol, params=params_vol)
             data = res.json()
@@ -220,46 +222,74 @@ class KISApi:
         print(f"✅ 최종 감시 대상: 총 {len(final_list)}개 종목 확보!")
         return final_list
 
-    def fetch_ohlcv(self, symbol, timeframe='3m', count=100):
-        time.sleep(0.5)
+    def fetch_ohlcv(self, symbol, timeframe='3m', count=60):
         """
-        [핵심 수정] 분봉 데이터 조회 전략
-        1순위: 한국투자증권(KIS) 3분봉
-        2순위: 실패 시 야후파이낸스 5분봉 (일봉 사용 절대 금지)
+        [분봉 데이터 조회 - 대량 수집 기능 추가]
+        API 한계(30개)를 극복하기 위해, count 개수가 찰 때까지
+        과거 시간으로 반복 조회(Pagination)를 수행합니다.
         """
-        # 1. KIS API 시도
-        headers = self.get_headers("FHKST03010200")
-        headers["content-type"] = "application/json; charset=utf-8"
-
-        now = datetime.now()
-        currentTime = now.strftime("%H%M%S")
-
-        # [시간 파라미터] 공란으로 두면 '가장 최근' 데이터를 줍니다.
-        # (이게 안 되면 장 운영 시간이 아니거나 권한 문제)
-        params = {
-            "fid_cond_mrkt_div_code": "J",  
-            "fid_input_iscd": symbol,       
-            "fid_input_hour_1": currentTime,
-            "fid_etc_cls_code": "",
-            "fid_pw_data_incu_yn": "Y"
-        }
+        headers = self.get_headers("FHKST03010200") 
         
-        try:
-            url = f"{URL_BASE}/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
-            res = requests.get(url, headers=headers, params=params)
-            data = res.json()
-            if data.get("output2"):
-                # KIS 성공
-                print(f"   ✅ KIS 분봉 성공({symbol}).")
-                return pd.DataFrame(data['output2'])
-            else:
-                # KIS 실패 -> 바로 야후 파이낸스로 전환
-                print(f"   ⚠️ KIS 분봉 실패({symbol}). 야후 파이낸스 연결 시도...")
-                return self.fetch_from_yfinance(symbol)
-
-        except Exception as e:
-            print(f"   ❌ KIS 에러: {e}. 야후 파이낸스 연결 시도...")
-            return self.fetch_from_yfinance(symbol)
+        # 데이터를 모을 리스트
+        all_data = []
+        
+        # 다음 조회 기준 시간 (처음엔 비워둠 -> 현재 시점부터 조회)
+        next_time = "" 
+        
+        while len(all_data) < count:
+            params = {
+                "fid_etc_cls_code": "", 
+                "fid_cond_mrkt_div_code": "J", 
+                "fid_input_iscd": symbol,
+                "fid_input_hour_1": next_time, # 이 시간부터 과거를 조회
+                "fid_pw_data_incu_yn": "Y"
+            }
+            
+            try:
+                # 너무 빠르면 차단되므로 0.2초 대기
+                time.sleep(0.2)
+                
+                url = f"{URL_BASE}/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
+                res = requests.get(url, headers=headers, params=params, timeout=2)
+                
+                if res.json()['rt_cd'] == '0':
+                    items = res.json()['output2']
+                    
+                    # 데이터가 없으면 종료
+                    if not items:
+                        break
+                        
+                    # 받아온 데이터 추가
+                    all_data.extend(items)
+                    
+                    # [중요] 마지막 데이터의 시간을 다음 조회 기준으로 설정
+                    # API가 주는 시간(stck_cntg_hour)을 그대로 다음 요청에 사용
+                    last_item_time = items[-1]['stck_cntg_hour']
+                    
+                    # 만약 시간이 갱신 안 되면 무한루프 방지
+                    if next_time == last_item_time:
+                        break
+                        
+                    next_time = last_item_time
+                    
+                else:
+                    # API 에러 시 중단
+                    break
+                    
+            except Exception as e:
+                print(f"   ⚠️ 데이터 조회 중단: {e}")
+                break
+        
+        # 모은 데이터가 있다면 DataFrame으로 변환
+        if all_data:
+            # 중복 제거 (혹시 모르니)
+            df = pd.DataFrame(all_data)
+            df = df.drop_duplicates(subset=['stck_cntg_hour'])
+            
+            # 요청한 개수만큼 자르기
+            return df.head(count)
+            
+        return None
 
     def fetch_from_yfinance(self, symbol):
         """
@@ -708,61 +738,79 @@ class KISApi:
 
     def get_market_index(self):
         """
-        [시장 지수 조회 - 하이브리드 방식]
-        1차 시도: KIS API (실전투자용, 가장 빠름)
-        2차 시도: 실패하거나 0.0이 나오면 야후 파이낸스 (모의투자용 비상 대책)
+        [시장 지수 조회 - 하이브리드]
+        1순위: 네이버 (실시간)
+        2순위: 야후 파이낸스 (네이버 실패 시 자동 전환)
         """
-        kospi_rate = 0.0
-        kosdaq_rate = 0.0
+        kospi = 0.0
+        kosdaq = 0.0
         
         # ---------------------------------------------------------
-        # [1차] KIS API 시도 (실전 서버에서는 이게 작동함)
+        # [1차 시도] 네이버 증권 (Naver)
         # ---------------------------------------------------------
         try:
-            # 업종/지수 전용 URL
-            headers = self.get_headers("FHKST01010100")
-            url = f"{URL_BASE}/uapi/domestic-stock/v1/quotations/inquire-price"
+            # 헤더를 리얼하게 설정하여 차단 방지
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer": "https://m.stock.naver.com/"
+            }
             
-            # 코스피(0001)
-            params = {"fid_cond_mrkt_div_code": "U", "fid_input_iscd": "0001"}
-            res = requests.get(url, headers=headers, params=params, timeout=1)
-            if res.json()['rt_cd'] == '0':
-                kospi_rate = float(res.json()['output']['prdy_ctrt'])
-            
-            # 코스닥(1001)
-            params = {"fid_cond_mrkt_div_code": "U", "fid_input_iscd": "1001"}
-            res = requests.get(url, headers=headers, params=params, timeout=1)
-            if res.json()['rt_cd'] == '0':
-                kosdaq_rate = float(res.json()['output']['prdy_ctrt'])
+            # KOSPI
+            url_ksp = "https://m.stock.naver.com/api/index/KOSPI/basic"
+            res = requests.get(url_ksp, headers=headers, timeout=2)
+            if res.status_code == 200:
+                data = res.json()
+                # 키값이 있는지 확인 후 가져오기
+                if 'fluctuationRate' in data:
+                    kospi = float(data['fluctuationRate'])
+                elif 'chgRate' in data: # 키 이름이 다를 경우 대비
+                    kospi = float(data['chgRate'])
+
+            # KOSDAQ
+            url_ksd = "https://m.stock.naver.com/api/index/KOSDAQ/basic"
+            res = requests.get(url_ksd, headers=headers, timeout=2)
+            if res.status_code == 200:
+                data = res.json()
+                if 'fluctuationRate' in data:
+                    kosdaq = float(data['fluctuationRate'])
+                elif 'chgRate' in data:
+                    kosdaq = float(data['chgRate'])
+
+            # 둘 중 하나라도 성공했으면 반환
+            if kospi != 0.0 or kosdaq != 0.0:
+                return kospi, kosdaq
 
         except Exception as e:
-            pass # KIS 실패하면 조용히 넘어감
+            # 네이버 실패 시 조용히 로그만 남기고 야후로 넘어감
+            print(f"   ⚠️ [네이버 패스] 야후로 전환합니다 ({e})")
 
         # ---------------------------------------------------------
-        # [2차] 야후 파이낸스 비상 대책 (모의투자라서 0.0 나오면 실행)
+        # [2차 시도] 야후 파이낸스 (Yahoo Finance) - 비상용
         # ---------------------------------------------------------
-        # 둘 다 0.0이면 데이터가 안 온 것으로 간주
-        if kospi_rate == 0.0 and kosdaq_rate == 0.0:
-            # print("   ⚠️ [VTS] KIS 지수 조회 불가 -> 야후 파이낸스로 전환합니다.")
-            try:
-                # 야후 파이낸스 티커: ^KS11(코스피), ^KQ11(코스닥)
-                # history(period='2d')로 어제와 오늘 데이터를 가져옴
-                ks_df = yf.Ticker("^KS11").history(period="2d")
-                kq_df = yf.Ticker("^KQ11").history(period="2d")
+        try:
+            import yfinance as yf
+            
+            # yfinance는 에러를 잘 뱉지 않으므로 try-except 필수
+            ks_ticker = yf.Ticker("^KS11")
+            kq_ticker = yf.Ticker("^KQ11")
+            
+            # 2일치 데이터 요청 (오늘, 어제)
+            ks_df = ks_ticker.history(period="2d")
+            kq_df = kq_ticker.history(period="2d")
 
-                if len(ks_df) >= 2:
-                    # (오늘종가 - 어제종가) / 어제종가 * 100
-                    kospi_rate = ((ks_df['Close'].iloc[-1] - ks_df['Close'].iloc[-2]) / ks_df['Close'].iloc[-2]) * 100
-                
-                if len(kq_df) >= 2:
-                    kosdaq_rate = ((kq_df['Close'].iloc[-1] - kq_df['Close'].iloc[-2]) / kq_df['Close'].iloc[-2]) * 100
-                    
-                # 소수점 둘째 자리까지만 (보기 좋게)
-                kospi_rate = round(kospi_rate, 2)
-                kosdaq_rate = round(kosdaq_rate, 2)
-                
-            except Exception as e:
-                # print(f"   ❌ 야후 지수 조회 실패: {e}")
-                pass
-        print(f"   [VTS] 코스피 지수: {kospi_rate:.2f}%, 코스닥 지수: {kosdaq_rate:.2f}%")
-        return kospi_rate, kosdaq_rate
+            # 코스피 계산
+            if len(ks_df) >= 2:
+                close_today = ks_df['Close'].iloc[-1]
+                close_prev = ks_df['Close'].iloc[-2]
+                kospi = ((close_today - close_prev) / close_prev) * 100
+
+            # 코스닥 계산
+            if len(kq_df) >= 2:
+                close_today = kq_df['Close'].iloc[-1]
+                close_prev = kq_df['Close'].iloc[-2]
+                kosdaq = ((close_today - close_prev) / close_prev) * 100
+
+        except Exception as e:
+            print(f"   ❌ [야후 실패] 지수 조회 불가: {e}")
+
+        return round(kospi, 2), round(kosdaq, 2)
